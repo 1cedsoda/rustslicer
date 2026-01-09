@@ -1,0 +1,37 @@
+# RustSlicer Default Configuration
+
+# Layer height in millimeters
+layer_height = 0.2
+
+# Infill percentage (0-100)
+infill_percentage = 20
+
+# Print speed in mm/s
+print_speed = 60.0
+
+# Travel speed in mm/s
+travel_speed = 120.0
+
+# Nozzle temperature in Celsius
+nozzle_temperature = 210
+
+# Bed temperature in Celsius
+bed_temperature = 60
+
+# Nozzle diameter in millimeters
+nozzle_diameter = 0.4
+
+# Filament diameter in millimeters
+filament_diameter = 1.75
+
+# Retraction distance in millimeters
+retraction_distance = 5.0
+
+# Retraction speed in mm/s
+retraction_speed = 40.0
+
+# Wall thickness in millimeters
+wall_thickness = 0.8
+
+# Top/bottom thickness in millimeters
+top_bottom_thickness = 0.8

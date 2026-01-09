@@ -1,0 +1,15 @@
+# RustSlicer High Quality Configuration
+# For detailed prints with fine features
+
+layer_height = 0.1
+infill_percentage = 30
+print_speed = 40.0
+travel_speed = 100.0
+nozzle_temperature = 215
+bed_temperature = 65
+nozzle_diameter = 0.4
+filament_diameter = 1.75
+retraction_distance = 6.0
+retraction_speed = 45.0
+wall_thickness = 1.2
+top_bottom_thickness = 1.0

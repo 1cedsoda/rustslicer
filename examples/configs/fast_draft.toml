@@ -1,0 +1,15 @@
+# RustSlicer Fast Draft Configuration
+# For quick prototypes and test prints
+
+layer_height = 0.3
+infill_percentage = 10
+print_speed = 80.0
+travel_speed = 150.0
+nozzle_temperature = 210
+bed_temperature = 60
+nozzle_diameter = 0.4
+filament_diameter = 1.75
+retraction_distance = 4.0
+retraction_speed = 40.0
+wall_thickness = 0.8
+top_bottom_thickness = 0.6
