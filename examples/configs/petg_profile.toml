@@ -1,0 +1,48 @@
+# RustSlicer PETG Profile
+
+[metadata]
+profile_name = "PETG Profile"
+version = "1.0"
+author = "Philipp"
+
+[machine]
+printer_type = "cartesian"
+build_volume = [220.0, 220.0, 250.0]
+nozzle_diameter = 0.4
+filament_diameter = 1.75
+max_feedrate = [300.0, 300.0, 12.0, 80.0]
+max_acceleration = [3000.0, 3000.0, 100.0, 5000.0]
+
+[print_settings]
+layer_height = 0.2
+first_layer_height = 0.3
+line_width = 0.45
+perimeters = 3
+external_perimeter_speed = 35.0
+perimeter_speed = 50.0
+top_solid_layers = 5
+bottom_solid_layers = 4
+infill_density = 0.25
+infill_pattern = "gyroid"
+infill_speed = 70.0
+solid_infill_speed = 50.0
+support_material = false
+
+[material]
+material_type = "PETG"
+nozzle_temperature = 240
+bed_temperature = 80
+first_layer_nozzle_temp = 245
+first_layer_bed_temp = 85
+fan_speed = 50  # PETG needs less cooling
+
+[advanced]
+retraction_length = 6.5
+retraction_speed = 35.0
+retraction_z_lift = 0.3
+
+[gcode]
+gcode_flavor = "marlin"
+use_relative_e = false
+start_gcode = "G28\nG1 Z15.0 F6000\nG92 E0\n"
+end_gcode = "M104 S0\nM140 S0\nM84\n"

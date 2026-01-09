@@ -1,0 +1,424 @@
+//! Slicing engine - converts 3D mesh to 2D layers
+
+use crate::config::PrintProfile;
+use crate::error::Result;
+use crate::geometry::{LineSegment2D, Mesh, Polygon};
+use nalgebra::Point2;
+use rayon::prelude::*;
+
+const TOLERANCE: f64 = 1e-6;
+
+/// Layer representation with contours and islands
+#[derive(Debug, Clone)]
+pub struct Layer {
+    pub z_height: f64,
+    pub layer_index: usize,
+    pub islands: Vec<Island>,
+}
+
+/// An island represents a disconnected region in a layer
+#[derive(Debug, Clone)]
+pub struct Island {
+    pub outline: Polygon,
+    pub holes: Vec<Polygon>,
+}
+
+/// Slicing engine
+pub struct SliceEngine {
+    mesh: Mesh,
+    config: PrintProfile,
+}
+
+impl SliceEngine {
+    /// Create new slicing engine
+    pub fn new(mesh: Mesh, config: PrintProfile) -> Self {
+        Self { mesh, config }
+    }
+
+    /// Slice mesh into layers with full contour generation
+    pub fn slice(&self) -> Result<Vec<Layer>> {
+        log::info!(
+            "Slicing mesh with {} triangles",
+            self.mesh.triangle_count()
+        );
+
+        // Get layer heights from either new quality settings or legacy print_settings
+        let layer_height = self.config.quality.as_ref()
+            .map(|q| q.layer_height)
+            .or_else(|| self.config.print_settings.as_ref().map(|ps| ps.layer_height))
+            .unwrap_or(0.2);
+        let first_layer_height = self.config.quality.as_ref()
+            .map(|q| q.first_layer_height)
+            .or_else(|| self.config.print_settings.as_ref().map(|ps| ps.first_layer_height))
+            .unwrap_or(0.3);
+
+        let total_height = self.mesh.bounds.dimensions().z;
+        let layer_count =
+            self.calculate_layer_count(total_height, first_layer_height, layer_height);
+
+        log::info!("Generating {} layers", layer_count);
+
+        // Generate Z heights for all layers
+        let z_heights: Vec<f64> = (0..layer_count)
+            .map(|i| {
+                if i == 0 {
+                    first_layer_height
+                } else {
+                    first_layer_height + (i - 1) as f64 * layer_height
+                }
+            })
+            .collect();
+
+        // Slice all layers in parallel
+        let layers: Vec<Layer> = z_heights
+            .par_iter()
+            .enumerate()
+            .map(|(layer_idx, &z)| self.slice_layer(layer_idx, z))
+            .collect::<Result<Vec<_>>>()?;
+
+        log::info!("Slicing complete");
+        Ok(layers)
+    }
+
+    /// Slice a single layer at height z
+    fn slice_layer(&self, layer_idx: usize, z: f64) -> Result<Layer> {
+        // Find all line segments where triangles intersect this plane
+        let segments: Vec<LineSegment2D> = self
+            .mesh
+            .triangles
+            .iter()
+            .filter_map(|tri| self.mesh.intersect_triangle_with_plane(tri, z))
+            .collect();
+
+        log::debug!("Layer {}: {} segments", layer_idx, segments.len());
+
+        if segments.is_empty() {
+            return Ok(Layer {
+                z_height: z,
+                layer_index: layer_idx,
+                islands: vec![],
+            });
+        }
+
+        // Build contours from line segments
+        let contours = self.build_contours(segments)?;
+        log::debug!("Layer {}: {} contours", layer_idx, contours.len());
+
+        // Detect islands (separate regions and their holes)
+        let islands = self.detect_islands(contours);
+        log::debug!("Layer {}: {} islands", layer_idx, islands.len());
+
+        Ok(Layer {
+            z_height: z,
+            layer_index: layer_idx,
+            islands,
+        })
+    }
+
+    /// Build closed contours from line segments
+    fn build_contours(&self, mut segments: Vec<LineSegment2D>) -> Result<Vec<Polygon>> {
+        let mut contours = Vec::new();
+
+        while !segments.is_empty() {
+            let mut current_contour = Vec::new();
+            let first_segment = segments.remove(0);
+
+            current_contour.push(first_segment.start);
+            current_contour.push(first_segment.end);
+
+            let mut current_end = first_segment.end;
+            let mut iterations = 0;
+            let max_iterations = segments.len() * 2 + 100;
+
+            // Keep connecting segments until we close the loop
+            loop {
+                iterations += 1;
+                if iterations > max_iterations {
+                    log::warn!(
+                        "Max iterations reached building contour, {} points, {} segments remaining",
+                        current_contour.len(),
+                        segments.len()
+                    );
+                    break;
+                }
+
+                // Check if contour is closed
+                let first_point = current_contour[0];
+                if current_contour.len() > 2
+                    && current_end.distance_to(&first_point) < TOLERANCE
+                {
+                    // Contour closed successfully
+                    break;
+                }
+
+                // Find next connecting segment
+                let next_segment_idx = segments
+                    .iter()
+                    .position(|seg| seg.connects_to_point(&current_end, TOLERANCE));
+
+                match next_segment_idx {
+                    Some(idx) => {
+                        let next_seg = segments.remove(idx);
+
+                        // Add next point based on which end connects
+                        if next_seg.start.distance_to(&current_end) < TOLERANCE {
+                            current_end = next_seg.end;
+                            current_contour.push(next_seg.end);
+                        } else {
+                            current_end = next_seg.start;
+                            current_contour.push(next_seg.start);
+                        }
+                    }
+                    None => {
+                        // No connecting segment found - this might be an open contour
+                        // or numerical issues. Try to close it if it's almost closed.
+                        let first_point = current_contour[0];
+                        if current_end.distance_to(&first_point) < TOLERANCE * 10.0 {
+                            // Close it approximately
+                            log::debug!(
+                                "Approximately closing contour (gap: {:.6})",
+                                current_end.distance_to(&first_point)
+                            );
+                            break;
+                        } else {
+                            log::warn!(
+                                "Open contour detected: {} points, gap: {:.6}",
+                                current_contour.len(),
+                                current_end.distance_to(&first_point)
+                            );
+                            break;
+                        }
+                    }
+                }
+            }
+
+            // Only add contours with at least 3 points
+            if current_contour.len() >= 3 {
+                contours.push(Polygon::new(current_contour));
+            }
+        }
+
+        Ok(contours)
+    }
+
+    /// Detect islands and their holes using point-in-polygon tests
+    fn detect_islands(&self, mut contours: Vec<Polygon>) -> Vec<Island> {
+        if contours.is_empty() {
+            return vec![];
+        }
+
+        // Sort contours by area (largest first)
+        contours.sort_by(|a, b| b.area().partial_cmp(&a.area()).unwrap());
+
+        let mut islands = Vec::new();
+        let mut used = vec![false; contours.len()];
+
+        for i in 0..contours.len() {
+            if used[i] {
+                continue;
+            }
+
+            let outline = contours[i].clone();
+            let mut holes = Vec::new();
+
+            // Find all contours contained within this one
+            for j in (i + 1)..contours.len() {
+                if used[j] {
+                    continue;
+                }
+
+                // Check if contour j is inside contour i
+                if self.polygon_contains_polygon(&outline, &contours[j]) {
+                    holes.push(contours[j].clone());
+                    used[j] = true;
+                }
+            }
+
+            islands.push(Island { outline, holes });
+            used[i] = true;
+        }
+
+        islands
+    }
+
+    /// Check if one polygon contains another (simple point-in-polygon test)
+    fn polygon_contains_polygon(&self, outer: &Polygon, inner: &Polygon) -> bool {
+        if inner.points.is_empty() {
+            return false;
+        }
+
+        // Check if a point from inner polygon is inside outer polygon
+        let test_point = inner.points[0];
+        self.point_in_polygon(&test_point, outer)
+    }
+
+    /// Ray casting algorithm for point-in-polygon test
+    fn point_in_polygon(&self, point: &Point2<f64>, polygon: &Polygon) -> bool {
+        let mut inside = false;
+        let n = polygon.points.len();
+
+        let mut j = n - 1;
+        for i in 0..n {
+            let pi = &polygon.points[i];
+            let pj = &polygon.points[j];
+
+            if ((pi.y > point.y) != (pj.y > point.y))
+                && (point.x < (pj.x - pi.x) * (point.y - pi.y) / (pj.y - pi.y) + pi.x)
+            {
+                inside = !inside;
+            }
+
+            j = i;
+        }
+
+        inside
+    }
+
+    fn calculate_layer_count(
+        &self,
+        total_height: f64,
+        first_layer_height: f64,
+        layer_height: f64,
+    ) -> usize {
+        if total_height <= first_layer_height {
+            return 1;
+        }
+
+        let remaining_height = total_height - first_layer_height;
+        1 + (remaining_height / layer_height).ceil() as usize
+    }
+}
+
+// Helper extension trait for LineSegment2D
+trait LineSegmentExt {
+    fn connects_to_point(&self, point: &Point2<f64>, tolerance: f64) -> bool;
+}
+
+impl LineSegmentExt for LineSegment2D {
+    fn connects_to_point(&self, point: &Point2<f64>, tolerance: f64) -> bool {
+        self.start.distance_to(point) < tolerance || self.end.distance_to(point) < tolerance
+    }
+}
+
+// Helper trait for Point2 distance
+trait PointDistance {
+    fn distance_to(&self, other: &Self) -> f64;
+}
+
+impl PointDistance for Point2<f64> {
+    fn distance_to(&self, other: &Point2<f64>) -> f64 {
+        ((self.x - other.x).powi(2) + (self.y - other.y).powi(2)).sqrt()
+    }
+}
+
+impl Layer {
+    /// Get total number of contours in this layer (outlines + holes)
+    pub fn contour_count(&self) -> usize {
+        self.islands
+            .iter()
+            .map(|island| 1 + island.holes.len())
+            .sum()
+    }
+
+    /// Check if layer is empty
+    pub fn is_empty(&self) -> bool {
+        self.islands.is_empty()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::PrintProfile;
+    use nalgebra::Point3;
+
+    #[test]
+    fn test_layer_count_calculation() {
+        let mesh = Mesh {
+            vertices: vec![Point3::origin(), Point3::new(0.0, 0.0, 10.0)],
+            triangles: vec![],
+            bounds: crate::geometry::BoundingBox {
+                min: Point3::origin(),
+                max: Point3::new(10.0, 10.0, 10.0),
+            },
+        };
+
+        let config = PrintProfile::default_pla();
+        let engine = SliceEngine::new(mesh, config);
+
+        let layer_count = engine.calculate_layer_count(10.0, 0.3, 0.2);
+        assert_eq!(layer_count, 50);
+    }
+
+    #[test]
+    fn test_contour_building() {
+        // Create a square from 4 segments
+        let segments = vec![
+            LineSegment2D {
+                start: Point2::new(0.0, 0.0),
+                end: Point2::new(1.0, 0.0),
+            },
+            LineSegment2D {
+                start: Point2::new(1.0, 0.0),
+                end: Point2::new(1.0, 1.0),
+            },
+            LineSegment2D {
+                start: Point2::new(1.0, 1.0),
+                end: Point2::new(0.0, 1.0),
+            },
+            LineSegment2D {
+                start: Point2::new(0.0, 1.0),
+                end: Point2::new(0.0, 0.0),
+            },
+        ];
+
+        let mesh = Mesh {
+            vertices: vec![],
+            triangles: vec![],
+            bounds: crate::geometry::BoundingBox {
+                min: Point3::origin(),
+                max: Point3::origin(),
+            },
+        };
+
+        let config = PrintProfile::default_pla();
+        let engine = SliceEngine::new(mesh, config);
+
+        let contours = engine.build_contours(segments).unwrap();
+        assert_eq!(contours.len(), 1);
+        assert_eq!(contours[0].points.len(), 5); // 4 corners + closing point
+    }
+
+    #[test]
+    fn test_point_in_polygon() {
+        let square = Polygon::new(vec![
+            Point2::new(0.0, 0.0),
+            Point2::new(2.0, 0.0),
+            Point2::new(2.0, 2.0),
+            Point2::new(0.0, 2.0),
+        ]);
+
+        let mesh = Mesh {
+            vertices: vec![],
+            triangles: vec![],
+            bounds: crate::geometry::BoundingBox {
+                min: Point3::origin(),
+                max: Point3::origin(),
+            },
+        };
+
+        let config = PrintProfile::default_pla();
+        let engine = SliceEngine::new(mesh, config);
+
+        // Point inside
+        assert!(engine.point_in_polygon(&Point2::new(1.0, 1.0), &square));
+
+        // Point outside
+        assert!(!engine.point_in_polygon(&Point2::new(3.0, 3.0), &square));
+
+        // Point on edge (might be inside or outside depending on implementation)
+        let on_edge = Point2::new(0.0, 1.0);
+        // Just check it doesn't crash
+        let _ = engine.point_in_polygon(&on_edge, &square);
+    }
+}

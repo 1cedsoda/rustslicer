@@ -1,0 +1,72 @@
+[package]
+name = "rustslicer"
+version = "0.1.0"
+edition = "2021"
+authors = ["Philipp"]
+description = "A high-performance 3D slicer that converts STL files to G-code"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/philipp/rustslicer"
+keywords = ["3d-printing", "slicer", "gcode", "stl", "manufacturing"]
+categories = ["command-line-utilities", "science"]
+
+[dependencies]
+# CLI Framework
+clap = { version = "4.4", features = ["derive", "cargo"] }
+colored = "2.1"
+indicatif = "0.17"
+
+# Configuration
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+toml = "0.8"
+config = "0.14"
+
+# STL Parsing
+stl_io = "0.7"
+
+# Geometry & Math
+nalgebra = "0.32"
+parry3d = "0.13"
+geo = "0.27"
+
+# Parallel Processing
+rayon = "1.8"
+
+# Error Handling
+anyhow = "1.0"
+thiserror = "1.0"
+
+# Logging
+log = "0.4"
+env_logger = "0.11"
+
+# Utility
+itertools = "0.12"
+ordered-float = "4.2"
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+proptest = "1.4"
+approx = "0.5"
+tempfile = "3.9"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
+
+[profile.bench]
+inherits = "release"
+
+[[bench]]
+name = "slicing_performance"
+harness = false
+
+[lib]
+name = "rustslicer"
+path = "src/lib.rs"
+
+[[bin]]
+name = "rustslicer"
+path = "src/main.rs"
